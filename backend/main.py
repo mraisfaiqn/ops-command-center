@@ -6,6 +6,7 @@ from typing import List
 from database import engine, get_db, Base
 import models
 import schemas
+from ai_service import generate_incident_report
 
 # Creates tables if they don't exist yet (fine for a one-day prototype;
 # use Alembic migrations if this ever goes beyond a demo)
@@ -94,4 +95,39 @@ def get_incident_report(incident_id: str, db: Session = Depends(get_db)):
     ).first()
     if not report:
         raise HTTPException(status_code=404, detail="No report generated yet for this incident")
+    return report
+
+
+@app.post("/incidents/{incident_id}/generate-report", response_model=schemas.IncidentReportOut)
+def create_incident_report(incident_id: str, db: Session = Depends(get_db)):
+    incident = db.query(models.Incident).filter(models.Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    asset = db.query(models.Asset).filter(models.Asset.id == incident.asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset linked to this incident not found")
+
+    try:
+        ai_output = generate_incident_report(asset, incident)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI report generation failed: {str(e)}")
+
+    # Regenerating replaces any existing report for this incident
+    existing = db.query(models.IncidentReport).filter(
+        models.IncidentReport.incident_id == incident_id
+    ).first()
+    if existing:
+        db.delete(existing)
+        db.commit()
+
+    report = models.IncidentReport(
+        incident_id=incident_id,
+        ai_summary=ai_output["summary"],
+        root_cause_hypothesis=ai_output["root_cause_hypothesis"],
+        stakeholder_email_draft=ai_output["stakeholder_email_draft"],
+    )
+    db.add(report)
+    db.commit()
+    db.refresh(report)
     return report
